@@ -42,9 +42,15 @@ const SCENES: &[(&str, fn(&mut Ui))] = &[
         s.editing = Some(Status::Away);
     }),
     ("settings", |s| s.page = Page::Settings),
-    ("update-ready", |s| {
+    ("update-available", |s| s.set_update_state(update::UpdateState::Available(demo_update()))),
+    ("update-later", |s| {
+        s.set_update_state(update::UpdateState::Available(demo_update()));
+        s.update_dialog = false;
         s.page = Page::Settings;
-        s.update = Some(update::UpdateState::Ready { version: "0.2.0".into() });
+    }),
+    ("update-downloading", |s| {
+        s.set_update_state(update::UpdateState::Available(demo_update()));
+        s.set_update_state(update::UpdateState::Downloading { version: "1.2.0".into() });
     }),
     ("help", |s| s.page = Page::Help),
     ("dark", |s| s.cfg.appearance = config::Appearance::Dark),
@@ -54,6 +60,14 @@ const SCENES: &[(&str, fn(&mut Ui))] = &[
         s.editing = Some(Status::Available);
     }),
 ];
+
+fn demo_update() -> update::Available {
+    update::Available {
+        version: "1.2.0".into(),
+        notes: "## What's changed\n* Blink and pulse for VT DND lights\n* Faster start-up\n* Fix the tray icon colour after sleep".into(),
+        url: "https://github.com/virtualManik/HudLight/releases".into(),
+    }
+}
 
 fn is_headless() -> bool {
     const FLAGS: &[&str] = &["--snap", "--tree", "--script", "--list-scenes", "--trace", "--video", "--out", "--first-pixels"];
@@ -107,9 +121,11 @@ fn main() {
                 notify.update(move |s, _| s.set_update_state(state));
             }),
             window_visible: Box::new(move || visible.is_visible()),
-            restart: Box::new(move || {
-                let _ = std::fs::create_dir_all(Config::dir());
-                let _ = std::fs::write(Config::dir().join(UPDATE_RESTART_MARKER), b"");
+            restart: Box::new(move |hidden| {
+                if hidden {
+                    let _ = std::fs::create_dir_all(Config::dir());
+                    let _ = std::fs::write(Config::dir().join(UPDATE_RESTART_MARKER), b"");
+                }
                 restart.relaunch();
             }),
         })

@@ -32,3 +32,4 @@ icon!(EXTERNAL, "blt-external", r#"<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 1
 icon!(RESET, "blt-reset", r#"<path d="M4 12a8 8 0 1 0 2.4-5.7L4 8.5"/><path d="M4 4v4.5h4.5"/>"#);
 icon!(SPARKLE, "blt-sparkle", r#"<path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9-1.9 5.1-1.9-5.1L5 10.5l5.1-1.9z"/><path d="M18.5 16.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>"#);
 icon!(USB, "blt-usb", r#"<rect x="7" y="9" width="10" height="12" rx="2"/><path d="M9 9V3.5h6V9M10.5 5.8h.01M13.5 5.8h.01"/>"#);
+icon!(DOWNLOAD, "blt-download", r#"<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5"/><path d="M4.5 19.5h15"/>"#);

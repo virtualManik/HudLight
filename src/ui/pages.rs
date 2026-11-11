@@ -582,17 +582,19 @@ fn updates(s: &Ui, p: Pal) -> El {
         (None, None) if s.live() => "Updates are off in development builds.".to_owned(),
         (None, _) => "Checks GitHub for new versions.".to_owned(),
     };
-    let action = if s.update_ready().is_some() {
-        w::button(p, "restart-update", "Restart now", Variant::Primary, |s, tx| s.restart_to_update(tx))
+    let action = if s.available_update().is_some() {
+        w::button(p, "settings-update-now", "Update now", Variant::Primary, |s, _| s.install_update())
+    } else if s.updating() {
+        el()
     } else {
         w::button(p, "check-update", "Check now", Variant::Outline, |s, _| s.check_for_update())
     };
     let rows = vec![
         w::setting(
             p,
-            "Update automatically",
-            "Install new versions from GitHub. HudLight restarts while it's in the tray, never while this window is open.",
-            w::toggle(p, "auto-update", "Update automatically", s.cfg.auto_update, |s| {
+            "Install updates automatically",
+            "While HudLight is in the tray, install new versions and restart by itself. With the window open, you're asked first.",
+            w::toggle(p, "auto-update", "Install updates automatically", s.cfg.auto_update, |s| {
                 let on = !s.cfg.auto_update;
                 s.set_auto_update(on);
             }),
@@ -600,6 +602,111 @@ fn updates(s: &Ui, p: Pal) -> El {
         w::setting(p, &format!("Version {}", crate::update::CURRENT), &status, action),
     ];
     w::card(p, "updates").child(w::card_header(p, "Updates", "Keep HudLight current", el())).child(w::divider(p)).child(w::rows(p, rows))
+}
+
+/// Release notes as plain lines: GitHub's generated Markdown without headings, bold markers,
+/// author credits and the changelog link.
+pub(super) fn plain_notes(notes: &str) -> String {
+    notes
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("**Full Changelog**"))
+        .map(|l| {
+            let l = l.trim_start_matches('#').trim().replace("**", "");
+            let l = match l.strip_prefix("* ").or_else(|| l.strip_prefix("- ")) {
+                Some(item) => format!("•  {item}"),
+                None => l,
+            };
+            // "Fix X by @someone in https://…/pull/3" → "Fix X".
+            match l.find(" by @") {
+                Some(i) if l[i..].contains(" in http") => l[..i].to_owned(),
+                _ => l,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The update dialog, over the whole window.
+pub fn update_dialog(s: &Ui, p: Pal) -> Option<El> {
+    use crate::update::{CURRENT, UpdateState};
+    let state = s.update.as_ref()?;
+    let (title, lead) = match state {
+        UpdateState::Available(a) | UpdateState::Failed { update: a, .. } => {
+            ("Update available".to_owned(), format!("HudLight {} is ready to install. You have {CURRENT}.", a.version))
+        }
+        UpdateState::Downloading { version } => (format!("Updating to {version}"), "Downloading… HudLight restarts by itself when it's done.".to_owned()),
+        UpdateState::Ready { version } => (format!("Updating to {version}"), "Installed. Restarting…".to_owned()),
+        _ => return None,
+    };
+    let header = row()
+        .w_full()
+        .gap(14.0)
+        .items_start()
+        .child(el().size(40.0, 40.0).radius(20.0).center().fill(p.secondary).child(icon(&icons::DOWNLOAD, 20.0).color(p.secondary_text).a11y_hidden()))
+        .child(col().grow(1.0).min_w(0.0).gap(4.0).child(text(title.clone()).font(w::CARD_TITLE).color(p.text)).child(text(lead).font(w::BODY).color(p.text2).wrap()));
+    let mut sheet = col()
+        .key("update-dialog")
+        .role("dialog")
+        .label(title)
+        .w(460.0)
+        .padding(24.0)
+        .gap(18.0)
+        .radius(14.0)
+        .fill(p.card)
+        .border(1.0, p.border)
+        .shadow(0.0, 24.0, rune::Color::BLACK.alpha(0.25))
+        .modal(true, |s: &mut Ui| s.dismiss_update())
+        .child(header);
+
+    if let Some(a) = state.available() {
+        let notes = plain_notes(&a.notes);
+        if !notes.is_empty() {
+            sheet = sheet.child(
+                col()
+                    .key("update-notes")
+                    .w_full()
+                    .max_h(180.0)
+                    .padding(14.0)
+                    .radius(10.0)
+                    .fill(p.muted)
+                    .border(1.0, p.divider)
+                    .scroll(rune::ScrollSpec { stick_bottom: false })
+                    .child(text(notes).font(w::SMALL).color(p.text).wrap()),
+            );
+        }
+        if let UpdateState::Failed { error, .. } = state {
+            sheet = sheet.child(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .items_start()
+                    .child(icon(&icons::ALERT, 16.0).color(p.danger).a11y_hidden())
+                    .child(text(format!("Update failed: {error}")).font(w::SMALL).color(p.danger).wrap().grow(1.0).min_w(0.0)),
+            );
+        }
+        let url = a.url.clone();
+        let link = (!url.is_empty()).then(|| {
+            w::button_icon(p, "update-notes-link", "Release notes", Some(&icons::EXTERNAL), Variant::Ghost, move |_, tx| {
+                let _ = tx.open_url(&url);
+            })
+        });
+        let go = if matches!(state, UpdateState::Failed { .. }) { "Try again" } else { "Update now" };
+        sheet = sheet.child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .children(link)
+                .child(el().grow(1.0))
+                .child(w::button(p, "update-later", "Later", Variant::Outline, |s, _| s.dismiss_update()))
+                .child(w::button_icon(p, "update-now", go, Some(&icons::DOWNLOAD), Variant::Primary, |s, _| s.install_update())),
+        );
+    } else {
+        // Downloading or restarting: nothing to choose, but the dialog can go.
+        sheet = sheet.child(row().w_full().child(el().grow(1.0)).child(w::button(p, "update-hide", "Hide", Variant::Outline, |s, _| s.update_dialog = false)));
+    }
+    Some(el().key("update-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).fill(rune::Color::BLACK.alpha(0.4)).center().child(sheet))
 }
 
 // --- Help ----------------------------------------------------------------------------------

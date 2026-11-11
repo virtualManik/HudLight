@@ -11,7 +11,7 @@ use rune::{AppHandle, Cx, El, ScrollSpec, TextEdit, Tray, TrayEvent, TrayIcon, T
 use crate::busylight::DeviceInfo;
 use crate::config::{Appearance, Config, Mode, Rgb, Status, StatusStyle};
 use crate::engine::{Cmd, EngineTx, GraphState, Output, Presence, Update};
-use crate::update::{UpdateState, Updater};
+use crate::update::{Available, UpdateState, Updater};
 use widgets::Pal;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +53,10 @@ pub struct Ui {
     pub updater: Option<Updater>,
     /// What the updater last reported.
     pub update: Option<UpdateState>,
+    /// Whether the update dialog is open.
+    pub update_dialog: bool,
+    /// The version "Later" was pressed for, so finding it again doesn't reopen the dialog.
+    update_dismissed: Option<String>,
     engine: Option<EngineTx>,
     handle: Option<AppHandle<Ui>>,
     tray: Option<Tray>,
@@ -85,6 +89,8 @@ impl Ui {
             message: None,
             updater: None,
             update: None,
+            update_dialog: false,
+            update_dismissed: None,
             engine,
             handle,
             tray: None,
@@ -221,26 +227,52 @@ impl Ui {
     }
 
     pub fn set_update_state(&mut self, state: UpdateState) {
-        let ready_changed = matches!(state, UpdateState::Ready { .. }) != matches!(self.update, Some(UpdateState::Ready { .. }));
+        let offered_before = self.available_update().map(|a| a.version.clone());
+        match &state {
+            // A newly found update opens the dialog, unless it was put off already.
+            UpdateState::Available(a) if self.update_dismissed.as_deref() != Some(a.version.as_str()) => self.update_dialog = true,
+            // HudLight is about to restart into the new version.
+            UpdateState::Ready { .. } => {
+                self.stop_preview();
+                self.flush_save();
+            }
+            _ => {}
+        }
         self.update = Some(state);
-        if ready_changed {
+        if self.available_update().map(|a| a.version.clone()) != offered_before {
             self.rebuild_tray_menu();
         }
     }
 
-    /// The version an installed update brings, waiting for a restart.
-    pub fn update_ready(&self) -> Option<&str> {
-        match &self.update {
-            Some(UpdateState::Ready { version }) => Some(version),
-            _ => None,
+    /// The update on offer, if any.
+    pub fn available_update(&self) -> Option<&Available> {
+        self.update.as_ref().and_then(UpdateState::available)
+    }
+
+    /// Whether an update is downloading or installed and about to restart.
+    pub fn updating(&self) -> bool {
+        matches!(self.update, Some(UpdateState::Downloading { .. } | UpdateState::Ready { .. }))
+    }
+
+    /// "Update now": download, install and restart.
+    pub fn install_update(&mut self) {
+        let Some(version) = self.available_update().map(|a| a.version.clone()) else { return };
+        if let Some(u) = &self.updater {
+            u.install_now();
+            self.update = Some(UpdateState::Downloading { version });
         }
     }
 
-    /// Restarts into an installed update, keeping the window as it is.
-    pub fn restart_to_update(&mut self, tx: &mut Tx) {
-        self.stop_preview();
-        self.flush_save();
-        tx.relaunch();
+    /// "Later": close the dialog; the sidebar keeps offering the update.
+    pub fn dismiss_update(&mut self) {
+        self.update_dialog = false;
+        self.update_dismissed = self.available_update().map(|a| a.version.clone());
+    }
+
+    pub fn open_update_dialog(&mut self) {
+        if self.available_update().is_some() || self.updating() {
+            self.update_dialog = true;
+        }
     }
 
     pub fn apply_graph_fields(&mut self) {
@@ -304,8 +336,8 @@ impl Ui {
             TrayItem::action("mode-off", mark(Mode::Off, "Light off")),
             TrayItem::Separator,
         ];
-        if let Some(v) = self.update_ready() {
-            items.push(TrayItem::action("restart-update", format!("Restart to update to {v}")));
+        if let Some(a) = self.available_update() {
+            items.push(TrayItem::action("show-update", format!("Update to {}…", a.version)));
         }
         items.push(TrayItem::action("quit", "Quit"));
         items
@@ -376,7 +408,10 @@ fn on_tray(h: &AppHandle<Ui>, e: TrayEvent) {
             "mode-teams" => h.update(|s, _| s.set_mode(Mode::Teams)),
             "mode-manual" => h.update(|s, _| s.set_mode(Mode::Manual)),
             "mode-off" => h.update(|s, _| s.set_mode(Mode::Off)),
-            "restart-update" => h.update(|s, tx| s.restart_to_update(tx)),
+            "show-update" => {
+                h.update(|s, _| s.open_update_dialog());
+                h.open();
+            }
             "quit" => h.update(|s, tx| {
                 s.stop_preview();
                 s.flush_save();
@@ -575,6 +610,45 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
                 .child(text(now).font(widgets::BODY_MED).color(p.text).truncate())
                 .child(text(device).font(widgets::SMALL).color(p.text2).truncate()),
         );
+    // An update on offer, or on its way in, above the status card.
+    let update_card = s.update.as_ref().and_then(|u| {
+        let (title, sub) = match u {
+            UpdateState::Available(a) => ("Update available".to_owned(), format!("Version {}", a.version)),
+            UpdateState::Failed { .. } => ("Update failed".to_owned(), "Click to try again".to_owned()),
+            UpdateState::Downloading { version } => ("Updating…".to_owned(), format!("Downloading {version}")),
+            UpdateState::Ready { .. } => ("Restarting…".to_owned(), "Update installed".to_owned()),
+            _ => return None,
+        };
+        Some(
+            row()
+                .key("side-update")
+                .role("button")
+                .label(format!("{title}: {sub}"))
+                .focusable(true)
+                .focus_ring(2.0, 0.0, p.ring.alpha(0.45))
+                .w_full()
+                .mb(8.0)
+                .padding(12.0)
+                .gap(11.0)
+                .center_y()
+                .radius(10.0)
+                .fill(p.primary)
+                .shadow(1.0, 2.0, p.shadow)
+                .hover(rune::Color::WHITE.alpha(0.08))
+                .press(rune::Color::BLACK.alpha(0.08))
+                .cursor(rune::Cursor::Pointer)
+                .on_press(|s: &mut Ui| s.open_update_dialog())
+                .child(rune::icon(&icons::DOWNLOAD, 17.0).color(p.primary_text).a11y_hidden())
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .gap(1.0)
+                        .child(text(title).font(widgets::BODY_MED).color(p.primary_text).truncate().a11y_hidden())
+                        .child(text(sub).font(widgets::SMALL).color(p.primary_text.alpha(0.85)).truncate().a11y_hidden()),
+                ),
+        )
+    });
     let rail = col()
         .key("sidebar")
         .w(224.0)
@@ -588,6 +662,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
         .child(text("MENU").font(widgets::LABEL).color(p.text2).px(10.0).pb(8.0))
         .child(nav)
         .child(el().grow(1.0))
+        .children(update_card)
         .child(status_card);
     let page = match s.page {
         Page::Light => pages::light(s, p),
@@ -612,7 +687,8 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
                 .scroll(ScrollSpec { stick_bottom: false })
                 .child(col().key("page").w_full().max_w(880.0).px(32.0).pt(30.0).pb(40.0).child(page)),
         );
-    row().key("window").w_full().h_full().fill(p.bg).child(rail).child(main)
+    let dialog = if s.update_dialog { pages::update_dialog(s, p) } else { None };
+    row().key("window").w_full().h_full().fill(p.bg).child(rail).child(main).children(dialog)
 }
 
 #[cfg(test)]

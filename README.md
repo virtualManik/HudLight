@@ -50,16 +50,18 @@ sees (devices, presence, output) to stderr.
 
 ## Updates
 
-Release builds update themselves from this repo's
-[GitHub Releases](https://github.com/virtualManik/HudLight/releases):
+Release builds check this repo's [GitHub Releases](https://github.com/virtualManik/HudLight/releases)
+for new versions:
 
-- **When it checks:** a minute after start, then every 6 hours.
-- **What it installs:** a release whose tag is newer than the running version. HudLight
-  downloads its `hudlight.exe`, checks the SHA-256, and swaps it in for the running exe.
-- **When the new version runs:** HudLight restarts itself only while it's in the tray, never while
-  the window is open. You can restart sooner from **Settings → Updates** or the tray menu.
-- **Turning it off:** use **Settings → Update automatically**. You can also set
-  `HUDLIGHT_NO_UPDATE=1`. Debug builds never update themselves.
+- **When it checks:** a minute after start, then every 6 hours. **Settings → Updates → Check
+  now** checks straight away.
+- **When one is found:** the sidebar shows **Update available** and a dialog shows the release
+  notes. **Update now** downloads the new `hudlight.exe`, checks its SHA-256, swaps it in for the
+  running exe and restarts. **Later** closes the dialog; the sidebar item and the tray menu still
+  offer the update.
+- **In the tray:** with **Install updates automatically** on (the default), HudLight installs and
+  restarts by itself while the window is closed. Turn it off to always be asked.
+- **Turning updates off:** set `HUDLIGHT_NO_UPDATE=1`. Debug builds never update themselves.
 
 Keep `hudlight.exe` in a folder you can write to, such as `%LOCALAPPDATA%\HudLight`, not
 `Program Files`. To publish a release:

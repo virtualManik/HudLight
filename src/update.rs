@@ -1,14 +1,17 @@
-//! Automatic updates from GitHub Releases.
+//! Updates from GitHub Releases.
 //!
 //! A background thread asks GitHub for the latest release of [`REPO`] a minute after start and
-//! every six hours after that. When the tag (`v1.2.3`) is newer than this build, it downloads the
-//! release's `hudlight.exe`, checks its SHA-256 against GitHub's asset digest (or a
-//! `hudlight.exe.sha256` asset), and swaps it in for the running exe. Windows lets a running exe
-//! be renamed, so the old one moves aside to `hudlight.exe.old` and is deleted on the next start.
+//! every six hours after that. When the tag (`v1.2.3`) is newer than this build it reports
+//! [`UpdateState::Available`], and the window shows it in the sidebar and offers it in a dialog.
 //!
-//! The new version runs after a restart. HudLight restarts itself when the window isn't showing
-//! (it's in the tray), so it never yanks a window away from you; otherwise it waits until the
-//! window is hidden, or until you quit.
+//! Installing downloads the release's `hudlight.exe`, checks its SHA-256 against GitHub's asset
+//! digest (or a `hudlight.exe.sha256` asset), and swaps it in for the running exe. Windows lets a
+//! running exe be renamed, so the old one moves aside to `hudlight.exe.old` and is deleted on the
+//! next start. Then HudLight restarts into the new version.
+//!
+//! An update installs when you choose **Update now**, or by itself when "Install updates
+//! automatically" is on and the window isn't showing (HudLight is in the tray), so it never
+//! restarts under you.
 //!
 //! Releases come from `.github/workflows/release.yml`, which builds and publishes one for every
 //! `v*` tag.
@@ -27,8 +30,6 @@ pub const REPO: &str = "virtualManik/HudLight";
 const ASSET: &str = "hudlight.exe";
 const FIRST_CHECK: Duration = Duration::from_secs(60);
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
-/// How often to look for a moment to restart once an update is in place.
-const RESTART_POLL: Duration = Duration::from_secs(60);
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
@@ -36,10 +37,24 @@ pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 pub enum UpdateState {
     Checking,
     UpToDate,
+    /// A newer release is out, waiting for the go-ahead.
+    Available(Available),
     Downloading { version: String },
-    /// The new exe is in place and runs after a restart.
+    /// The new exe is in place; HudLight is restarting into it.
     Ready { version: String },
+    /// Installing failed; the update is still on offer.
+    Failed { update: Available, error: String },
+    /// Checking failed.
     Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Available {
+    pub version: String,
+    /// The release notes, as written on GitHub.
+    pub notes: String,
+    /// The release's page on GitHub.
+    pub url: String,
 }
 
 impl UpdateState {
@@ -48,30 +63,54 @@ impl UpdateState {
         match self {
             UpdateState::Checking => "Checking for updates…".into(),
             UpdateState::UpToDate => format!("Up to date ({CURRENT})"),
+            UpdateState::Available(a) => format!("Version {} is available", a.version),
             UpdateState::Downloading { version } => format!("Downloading {version}…"),
-            UpdateState::Ready { version } => format!("{version} is installed and runs after a restart"),
-            UpdateState::Error(e) => format!("Update failed: {e}"),
+            UpdateState::Ready { version } => format!("{version} is installed. Restarting…"),
+            UpdateState::Failed { error, .. } => format!("Update failed: {error}"),
+            UpdateState::Error(e) => format!("Couldn't check for updates: {e}"),
+        }
+    }
+
+    /// The update on offer, if any.
+    pub fn available(&self) -> Option<&Available> {
+        match self {
+            UpdateState::Available(a) | UpdateState::Failed { update: a, .. } => Some(a),
+            _ => None,
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Release {
     tag_name: String,
     #[serde(default)]
     draft: bool,
     #[serde(default)]
     prerelease: bool,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    html_url: String,
     assets: Vec<Asset>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Asset {
     name: String,
     browser_download_url: String,
     /// `sha256:<hex>`, which GitHub computes for uploaded assets.
     #[serde(default)]
     digest: Option<String>,
+}
+
+impl Release {
+    fn version(&self) -> String {
+        self.tag_name.trim_start_matches(['v', 'V']).to_owned()
+    }
+
+    fn offer(&self) -> Available {
+        Available { version: self.version(), notes: self.body.clone().unwrap_or_default().trim().to_owned(), url: self.html_url.clone() }
+    }
 }
 
 /// `1.2.3` from `v1.2.3` or `1.2.3`; pre-release and build suffixes are dropped.
@@ -95,40 +134,42 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
-fn latest_release(agent: &ureq::Agent) -> Result<Release, String> {
+/// The latest release when it's newer than this build.
+fn newer_release(agent: &ureq::Agent) -> Result<Option<Release>, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    match agent.get(&url).set("Accept", "application/vnd.github+json").call() {
-        Ok(r) => r.into_json::<Release>().map_err(|e| format!("Couldn't read the release: {e}")),
+    let release = match agent.get(&url).set("Accept", "application/vnd.github+json").call() {
+        Ok(r) => r.into_json::<Release>().map_err(|e| format!("couldn't read the release: {e}"))?,
         // No release published yet.
-        Err(ureq::Error::Status(404, _)) => Err("no release".into()),
-        Err(e) => Err(format!("Couldn't reach GitHub: {e}")),
-    }
+        Err(ureq::Error::Status(404, _)) => return Ok(None),
+        Err(e) => return Err(format!("couldn't reach GitHub: {e}")),
+    };
+    Ok((!release.draft && !release.prerelease && is_newer(&release.tag_name, CURRENT)).then_some(release))
 }
 
 fn expected_sha256(agent: &ureq::Agent, release: &Release, asset: &Asset) -> Result<String, String> {
     if let Some(hex) = asset.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")) {
         return Ok(hex.to_ascii_lowercase());
     }
-    let sums = release.assets.iter().find(|a| a.name == format!("{ASSET}.sha256")).ok_or("The release has no checksum for hudlight.exe.")?;
+    let sums = release.assets.iter().find(|a| a.name == format!("{ASSET}.sha256")).ok_or("the release has no checksum for hudlight.exe")?;
     let text = agent.get(&sums.browser_download_url).call().map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())?;
     // `sha256sum` style: "<hex>  hudlight.exe", or just the hex.
     let hex = text.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
-    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) { Ok(hex) } else { Err("The release's checksum file is malformed.".into()) }
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) { Ok(hex) } else { Err("the release's checksum file is malformed".into()) }
 }
 
 fn download(agent: &ureq::Agent, url: &str, to: &Path) -> Result<String, String> {
-    let resp = agent.get(url).call().map_err(|e| format!("Download failed: {e}"))?;
+    let resp = agent.get(url).call().map_err(|e| format!("download failed: {e}"))?;
     let mut reader = resp.into_reader();
-    let mut file = std::fs::File::create(to).map_err(|e| format!("Couldn't save the update: {e}"))?;
+    let mut file = std::fs::File::create(to).map_err(|e| format!("couldn't save the update: {e}"))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = std::io::Read::read(&mut reader, &mut buf).map_err(|e| format!("Download failed: {e}"))?;
+        let n = std::io::Read::read(&mut reader, &mut buf).map_err(|e| format!("download failed: {e}"))?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
-        std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| format!("Couldn't save the update: {e}"))?;
+        std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| format!("couldn't save the update: {e}"))?;
     }
     std::io::Write::flush(&mut file).map_err(|e| e.to_string())?;
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
@@ -142,30 +183,20 @@ fn old_path(exe: &Path) -> PathBuf {
 fn swap_in(new: &Path, exe: &Path) -> Result<(), String> {
     let old = old_path(exe);
     let _ = std::fs::remove_file(&old);
-    std::fs::rename(exe, &old).map_err(|e| format!("Couldn't replace {} ({e}). Is it in a protected folder?", exe.display()))?;
+    std::fs::rename(exe, &old).map_err(|e| format!("couldn't replace {} ({e}). Is it in a protected folder?", exe.display()))?;
     if let Err(e) = std::fs::copy(new, exe) {
         let _ = std::fs::rename(&old, exe);
-        return Err(format!("Couldn't install the update: {e}"));
+        return Err(format!("couldn't install the update: {e}"));
     }
     let _ = std::fs::remove_file(new);
     Ok(())
 }
 
-/// One check: `Ok(Some(version))` when an update was put in place.
-fn check_once(on_state: &dyn Fn(UpdateState)) -> Result<Option<String>, String> {
+/// Downloads, checks and swaps in a release.
+fn install(release: &Release) -> Result<(), String> {
     let agent = agent();
-    let release = match latest_release(&agent) {
-        Err(e) if e == "no release" => return Ok(None),
-        r => r?,
-    };
-    if release.draft || release.prerelease || !is_newer(&release.tag_name, CURRENT) {
-        return Ok(None);
-    }
-    let version = release.tag_name.trim_start_matches(['v', 'V']).to_owned();
-    let asset = release.assets.iter().find(|a| a.name.eq_ignore_ascii_case(ASSET)).ok_or("The release has no hudlight.exe.")?;
-    let want = expected_sha256(&agent, &release, asset)?;
-    on_state(UpdateState::Downloading { version: version.clone() });
-
+    let asset = release.assets.iter().find(|a| a.name.eq_ignore_ascii_case(ASSET)).ok_or("the release has no hudlight.exe")?;
+    let want = expected_sha256(&agent, release, asset)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     // Download next to the exe, so the swap is a rename on the same drive and a folder we
     // can't write to fails here, before anything changes.
@@ -175,10 +206,9 @@ fn check_once(on_state: &dyn Fn(UpdateState)) -> Result<Option<String>, String> 
     })?;
     if got != want {
         let _ = std::fs::remove_file(&staged);
-        return Err(format!("The downloaded update failed its checksum (expected {want}, got {got})."));
+        return Err("the download didn't match its checksum".into());
     }
-    swap_in(&staged, &exe)?;
-    Ok(Some(version))
+    swap_in(&staged, &exe)
 }
 
 /// Deletes what the last update left behind. Call at start.
@@ -197,19 +227,20 @@ pub fn enabled_for_this_build() -> bool {
 
 /// What the updater needs from the app.
 pub struct Hooks {
-    /// The user's "Update automatically" setting at start.
+    /// The user's "Install updates automatically" setting at start.
     pub auto: bool,
     pub on_state: Box<dyn Fn(UpdateState) + Send>,
-    /// Whether the window is on screen; HudLight only restarts itself when it isn't.
+    /// Whether the window is on screen; HudLight only installs by itself when it isn't.
     pub window_visible: Box<dyn Fn() -> bool + Send>,
-    /// Quit and start again (the new exe), coming back in the tray.
-    pub restart: Box<dyn Fn() + Send>,
+    /// Quit and start again (the new exe); `true` to come back in the tray.
+    pub restart: Box<dyn Fn(bool) + Send>,
 }
 
 /// The UI's side of the updater thread.
 pub struct Updater {
     auto: Arc<AtomicBool>,
     check_now: Arc<AtomicBool>,
+    install_now: Arc<AtomicBool>,
 }
 
 impl Updater {
@@ -220,46 +251,82 @@ impl Updater {
     pub fn check_now(&self) {
         self.check_now.store(true, Ordering::Release);
     }
+
+    /// Installs the available update and restarts.
+    pub fn install_now(&self) {
+        self.install_now.store(true, Ordering::Release);
+    }
 }
 
 /// Starts the updater thread.
 pub fn spawn(hooks: Hooks) -> Updater {
-    let updater = Updater { auto: Arc::new(AtomicBool::new(hooks.auto)), check_now: Arc::new(AtomicBool::new(false)) };
-    let (auto, check_now) = (updater.auto.clone(), updater.check_now.clone());
-    let _ = std::thread::Builder::new().name("hudlight-update".into()).spawn(move || run(hooks, &auto, &check_now));
+    let updater = Updater {
+        auto: Arc::new(AtomicBool::new(hooks.auto)),
+        check_now: Arc::new(AtomicBool::new(false)),
+        install_now: Arc::new(AtomicBool::new(false)),
+    };
+    let flags = (updater.auto.clone(), updater.check_now.clone(), updater.install_now.clone());
+    let _ = std::thread::Builder::new().name("hudlight-update".into()).spawn(move || run(hooks, &flags.0, &flags.1, &flags.2));
     updater
 }
 
-fn run(hooks: Hooks, auto: &AtomicBool, check_now: &AtomicBool) {
+fn run(hooks: Hooks, auto: &AtomicBool, check_now: &AtomicBool, install_now: &AtomicBool) {
     let mut next_check = Instant::now() + FIRST_CHECK;
-    let mut ready: Option<String> = None;
+    let mut pending: Option<Release> = None;
     loop {
         std::thread::sleep(Duration::from_secs(1));
-        if let Some(version) = &ready {
-            // Restart into the new version once nobody's looking at the window.
-            if !(hooks.window_visible)() {
-                if std::env::var_os("HUDLIGHT_DEBUG").is_some() {
-                    eprintln!("hudlight: restarting into {version}");
+
+        if let Some(release) = pending.clone() {
+            let asked = install_now.swap(false, Ordering::AcqRel);
+            let hidden = !(hooks.window_visible)();
+            if asked || (hidden && auto.load(Ordering::Acquire)) {
+                let version = release.version();
+                (hooks.on_state)(UpdateState::Downloading { version: version.clone() });
+                match install(&release) {
+                    Ok(()) => {
+                        (hooks.on_state)(UpdateState::Ready { version });
+                        // Let the window show "Restarting…" for a moment.
+                        std::thread::sleep(Duration::from_millis(800));
+                        (hooks.restart)(hidden);
+                        return;
+                    }
+                    Err(error) => {
+                        (hooks.on_state)(UpdateState::Failed { update: release.offer(), error });
+                        if !asked {
+                            // Don't retry by itself every second; the next check offers it again.
+                            pending = None;
+                        }
+                    }
                 }
-                (hooks.restart)();
-                return;
+                continue;
             }
-            std::thread::sleep(RESTART_POLL);
-            continue;
+        } else {
+            install_now.store(false, Ordering::Release);
         }
+
         let forced = check_now.swap(false, Ordering::AcqRel);
-        if !forced && (Instant::now() < next_check || !auto.load(Ordering::Acquire)) {
+        if !forced && Instant::now() < next_check {
             continue;
         }
         next_check = Instant::now() + CHECK_EVERY;
-        (hooks.on_state)(UpdateState::Checking);
-        match check_once(&*hooks.on_state) {
-            Ok(Some(version)) => {
-                (hooks.on_state)(UpdateState::Ready { version: version.clone() });
-                ready = Some(version);
+        if pending.is_none() {
+            (hooks.on_state)(UpdateState::Checking);
+        }
+        match newer_release(&agent()) {
+            Ok(Some(release)) => {
+                // Offer it again only when it's new, so a dismissed dialog stays dismissed.
+                if pending.as_ref().map(|p| p.tag_name.as_str()) != Some(release.tag_name.as_str()) || forced {
+                    (hooks.on_state)(UpdateState::Available(release.offer()));
+                }
+                pending = Some(release);
             }
-            Ok(None) => (hooks.on_state)(UpdateState::UpToDate),
-            Err(e) => (hooks.on_state)(UpdateState::Error(e)),
+            Ok(None) => {
+                pending = None;
+                (hooks.on_state)(UpdateState::UpToDate);
+            }
+            Err(e) if pending.is_none() => (hooks.on_state)(UpdateState::Error(e)),
+            // Keep offering what we already found.
+            Err(_) => {}
         }
     }
 }
@@ -293,5 +360,12 @@ mod tests {
         assert_eq!(std::fs::read(old_path(&exe)).unwrap(), b"old");
         assert!(!new.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_release_offers_its_version_and_notes() {
+        let json = r#"{"tag_name":"v1.2.0","html_url":"https://example/r","body":"  Fixes  ","assets":[]}"#;
+        let r: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(r.offer(), Available { version: "1.2.0".into(), notes: "Fixes".into(), url: "https://example/r".into() });
     }
 }

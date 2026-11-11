@@ -203,3 +203,43 @@ fn headless_autostart_toggle_never_touches_the_registry() {
     assert!(rt.state.cfg.start_with_windows);
     assert!(rt.state.message.is_none());
 }
+
+fn offer(version: &str) -> crate::update::UpdateState {
+    crate::update::UpdateState::Available(crate::update::Available {
+        version: version.into(),
+        notes: "## What's Changed\n* Blink for VT lights by @someone in https://github.com/x/y/pull/1\n\n**Full Changelog**: https://x".into(),
+        url: String::new(),
+    })
+}
+
+#[test]
+fn a_found_update_shows_a_dialog_and_stays_in_the_sidebar_after_later() {
+    let mut rt = rt();
+    assert!(rt.find("side-update").is_none());
+    rt.update(|s, _| s.set_update_state(offer("9.0.0")));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("update-dialog").is_some(), "the dialog opens");
+    assert!(rt.find("side-update").is_some(), "the sidebar shows it");
+
+    click(&mut rt, "update-later");
+    assert!(rt.find("update-dialog").is_none(), "Later closes it");
+    assert!(rt.find("side-update").is_some(), "and the sidebar keeps it");
+
+    // Finding the same version again doesn't nag; the sidebar reopens it.
+    rt.update(|s, _| s.set_update_state(offer("9.0.0")));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("update-dialog").is_none());
+    click(&mut rt, "side-update");
+    assert!(rt.find("update-dialog").is_some());
+
+    // A newer one than the one put off asks again.
+    click(&mut rt, "update-later");
+    rt.update(|s, _| s.set_update_state(offer("9.1.0")));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.find("update-dialog").is_some());
+}
+
+#[test]
+fn release_notes_lose_their_markdown() {
+    assert_eq!(super::pages::plain_notes("## What's Changed\n* Blink for VT lights by @someone in https://github.com/x/y/pull/1\n\n**Full Changelog**: https://x"), "What's Changed\n•  Blink for VT lights");
+}
