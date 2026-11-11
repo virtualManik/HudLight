@@ -1,0 +1,35 @@
+[package]
+name = "hudlight"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "HudLight: a desktop app for the VT DND Omega / Kuando Busylight that follows your Microsoft Teams status."
+
+[[bin]]
+name = "hudlight"
+path = "src/main.rs"
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "29aacb688883a9712bc27175bdafd99fc6edb421" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(not(windows))'.dependencies]
+hidapi = "2.6"
+
+[profile.release]
+codegen-units = 16
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
