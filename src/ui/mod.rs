@@ -11,6 +11,7 @@ use rune::{AppHandle, Cx, El, ScrollSpec, TextEdit, Tray, TrayEvent, TrayIcon, T
 use crate::busylight::DeviceInfo;
 use crate::config::{Appearance, Config, Mode, Rgb, Status, StatusStyle};
 use crate::engine::{Cmd, EngineTx, GraphState, Output, Presence, Update};
+use crate::update::{UpdateState, Updater};
 use widgets::Pal;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +49,10 @@ pub struct Ui {
     pub client_id: TextEdit,
     pub tenant: TextEdit,
     pub message: Option<String>,
+    /// The background updater; `None` in dev builds, snapshots and tests.
+    pub updater: Option<Updater>,
+    /// What the updater last reported.
+    pub update: Option<UpdateState>,
     engine: Option<EngineTx>,
     handle: Option<AppHandle<Ui>>,
     tray: Option<Tray>,
@@ -78,6 +83,8 @@ impl Ui {
             hex_seen: String::new(),
             hex_color: Rgb::OFF,
             message: None,
+            updater: None,
+            update: None,
             engine,
             handle,
             tray: None,
@@ -198,6 +205,44 @@ impl Ui {
         self.send(Cmd::GraphSignOut);
     }
 
+    pub fn set_auto_update(&mut self, on: bool) {
+        self.cfg.auto_update = on;
+        if let Some(u) = &self.updater {
+            u.set_auto(on);
+        }
+        self.commit();
+    }
+
+    pub fn check_for_update(&mut self) {
+        if let Some(u) = &self.updater {
+            self.update = Some(UpdateState::Checking);
+            u.check_now();
+        }
+    }
+
+    pub fn set_update_state(&mut self, state: UpdateState) {
+        let ready_changed = matches!(state, UpdateState::Ready { .. }) != matches!(self.update, Some(UpdateState::Ready { .. }));
+        self.update = Some(state);
+        if ready_changed {
+            self.rebuild_tray_menu();
+        }
+    }
+
+    /// The version an installed update brings, waiting for a restart.
+    pub fn update_ready(&self) -> Option<&str> {
+        match &self.update {
+            Some(UpdateState::Ready { version }) => Some(version),
+            _ => None,
+        }
+    }
+
+    /// Restarts into an installed update, keeping the window as it is.
+    pub fn restart_to_update(&mut self, tx: &mut Tx) {
+        self.stop_preview();
+        self.flush_save();
+        tx.relaunch();
+    }
+
     pub fn apply_graph_fields(&mut self) {
         let id = self.client_id.text.trim().to_owned();
         let tenant = self.tenant.text.trim().to_owned();
@@ -251,15 +296,19 @@ impl Ui {
 
     fn tray_menu(&self) -> Vec<TrayItem> {
         let mark = |m: Mode, label: &str| if self.cfg.mode == m { format!("✓ {label}") } else { format!("    {label}") };
-        vec![
+        let mut items = vec![
             TrayItem::action("open", "Open HudLight"),
             TrayItem::Separator,
             TrayItem::action("mode-teams", mark(Mode::Teams, "Follow Teams status")),
             TrayItem::action("mode-manual", mark(Mode::Manual, "Manual colour")),
             TrayItem::action("mode-off", mark(Mode::Off, "Light off")),
             TrayItem::Separator,
-            TrayItem::action("quit", "Quit"),
-        ]
+        ];
+        if let Some(v) = self.update_ready() {
+            items.push(TrayItem::action("restart-update", format!("Restart to update to {v}")));
+        }
+        items.push(TrayItem::action("quit", "Quit"));
+        items
     }
 
     fn rebuild_tray_menu(&self) {
@@ -327,6 +376,7 @@ fn on_tray(h: &AppHandle<Ui>, e: TrayEvent) {
             "mode-teams" => h.update(|s, _| s.set_mode(Mode::Teams)),
             "mode-manual" => h.update(|s, _| s.set_mode(Mode::Manual)),
             "mode-off" => h.update(|s, _| s.set_mode(Mode::Off)),
+            "restart-update" => h.update(|s, tx| s.restart_to_update(tx)),
             "quit" => h.update(|s, tx| {
                 s.stop_preview();
                 s.flush_save();

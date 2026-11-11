@@ -14,9 +14,13 @@ mod icons;
 mod secret;
 mod teams;
 mod ui;
+mod update;
 
 use config::{Config, Effect, Mode, Status};
 use ui::{Page, Ui};
+
+/// Left in the settings folder by an update restart, so the new process starts in the tray.
+const UPDATE_RESTART_MARKER: &str = "restarted-for-update";
 
 const SCENES: &[(&str, fn(&mut Ui))] = &[
     ("light", |_| {}),
@@ -38,6 +42,10 @@ const SCENES: &[(&str, fn(&mut Ui))] = &[
         s.editing = Some(Status::Away);
     }),
     ("settings", |s| s.page = Page::Settings),
+    ("update-ready", |s| {
+        s.page = Page::Settings;
+        s.update = Some(update::UpdateState::Ready { version: "0.2.0".into() });
+    }),
     ("help", |s| s.page = Page::Help),
     ("dark", |s| s.cfg.appearance = config::Appearance::Dark),
     ("dark-colors", |s| {
@@ -77,11 +85,35 @@ fn main() {
     if let Err(e) = rune::set_app_icon(include_bytes!("../assets/icon-256.png").as_slice()) {
         eprintln!("hudlight: {e}");
     }
+    update::clean_up();
     let cfg = Config::load();
-    if minimized || cfg.start_minimized {
+    // An update restart happens only while the window is hidden; come back the same way.
+    let restarted_hidden = std::fs::remove_file(Config::dir().join(UPDATE_RESTART_MARKER)).is_ok();
+    if minimized || cfg.start_minimized || restarted_hidden {
         app = app.windowless();
     }
     let handle = app.handle();
+    let updater = update::enabled_for_this_build().then(|| {
+        let visible = handle.clone();
+        let restart = handle.clone();
+        let notify = handle.clone();
+        let debug = std::env::var_os("HUDLIGHT_DEBUG").is_some();
+        update::spawn(update::Hooks {
+            auto: cfg.auto_update,
+            on_state: Box::new(move |state| {
+                if debug {
+                    eprintln!("hudlight: {}", state.label());
+                }
+                notify.update(move |s, _| s.set_update_state(state));
+            }),
+            window_visible: Box::new(move || visible.is_visible()),
+            restart: Box::new(move || {
+                let _ = std::fs::create_dir_all(Config::dir());
+                let _ = std::fs::write(Config::dir().join(UPDATE_RESTART_MARKER), b"");
+                restart.relaunch();
+            }),
+        })
+    });
     let notify = handle.clone();
     let debug = std::env::var_os("HUDLIGHT_DEBUG").is_some();
     let engine = engine::Engine::start(cfg.clone(), move |u| {
@@ -94,6 +126,7 @@ fn main() {
     let init_handle = handle.clone();
     app = app.args(std::env::args().skip(1).filter(|a| a != "--minimized").collect::<Vec<_>>()).init(move || {
         let mut s = Ui::new(cfg, Some(tx), Some(init_handle));
+        s.updater = updater;
         s.refresh_tray();
         s
     });

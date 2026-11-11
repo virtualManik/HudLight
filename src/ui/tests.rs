@@ -111,6 +111,10 @@ fn settings_controls_change_settings() {
     rt.pointer_up(x - 105.0, y);
     rt.frame(1.0 / 60.0);
     assert!(rt.state.cfg.brightness < 0.1, "{}", rt.state.cfg.brightness);
+    // Last, as reaching it scrolls the page.
+    assert!(rt.state.cfg.auto_update);
+    click(&mut rt, "auto-update");
+    assert!(!rt.state.cfg.auto_update);
 }
 
 #[test]

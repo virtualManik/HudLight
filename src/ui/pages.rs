@@ -573,6 +573,33 @@ pub fn settings(s: &Ui, p: Pal) -> El {
         .child(w::page_header(p, "Settings", "Tune the light and how HudLight runs.", el()))
         .child(light)
         .child(app)
+        .child(updates(s, p))
+}
+
+fn updates(s: &Ui, p: Pal) -> El {
+    let status = match (&s.update, &s.updater) {
+        (Some(state), _) => state.label(),
+        (None, None) if s.live() => "Updates are off in development builds.".to_owned(),
+        (None, _) => "Checks GitHub for new versions.".to_owned(),
+    };
+    let action = if s.update_ready().is_some() {
+        w::button(p, "restart-update", "Restart now", Variant::Primary, |s, tx| s.restart_to_update(tx))
+    } else {
+        w::button(p, "check-update", "Check now", Variant::Outline, |s, _| s.check_for_update())
+    };
+    let rows = vec![
+        w::setting(
+            p,
+            "Update automatically",
+            "Install new versions from GitHub. HudLight restarts while it's in the tray, never while this window is open.",
+            w::toggle(p, "auto-update", "Update automatically", s.cfg.auto_update, |s| {
+                let on = !s.cfg.auto_update;
+                s.set_auto_update(on);
+            }),
+        ),
+        w::setting(p, &format!("Version {}", crate::update::CURRENT), &status, action),
+    ];
+    w::card(p, "updates").child(w::card_header(p, "Updates", "Keep HudLight current", el())).child(w::divider(p)).child(w::rows(p, rows))
 }
 
 // --- Help ----------------------------------------------------------------------------------

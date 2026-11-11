@@ -48,6 +48,31 @@ target\release\hudlight.exe --minimized  # starts in the tray
 Settings live in `%APPDATA%\HudLight\config.json`. Set `HUDLIGHT_DEBUG=1` to log what the engine
 sees (devices, presence, output) to stderr.
 
+## Updates
+
+Release builds update themselves from this repo's
+[GitHub Releases](https://github.com/virtualManik/HudLight/releases):
+
+- **When it checks:** a minute after start, then every 6 hours.
+- **What it installs:** a release whose tag is newer than the running version. HudLight
+  downloads its `hudlight.exe`, checks the SHA-256, and swaps it in for the running exe.
+- **When the new version runs:** HudLight restarts itself only while it's in the tray, never while
+  the window is open. You can restart sooner from **Settings → Updates** or the tray menu.
+- **Turning it off:** use **Settings → Update automatically**. You can also set
+  `HUDLIGHT_NO_UPDATE=1`. Debug builds never update themselves.
+
+Keep `hudlight.exe` in a folder you can write to, such as `%LOCALAPPDATA%\HudLight`, not
+`Program Files`. To publish a release:
+
+```powershell
+# bump `version` in Cargo.toml, commit, then:
+git tag v0.2.0
+git push origin main v0.2.0
+```
+
+`.github/workflows/release.yml` checks that the tag matches `Cargo.toml`, runs the tests, builds,
+and publishes `hudlight.exe` and `hudlight.exe.sha256`.
+
 ## Supported lights
 
 - **VT DND Omega and DND Alpha** (`340B:F001`, `340B:F002`), made by Xiamen VBeT.

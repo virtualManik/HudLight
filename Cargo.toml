@@ -1,6 +1,6 @@
 [package]
 name = "hudlight"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 description = "HudLight: a desktop app for the VT DND Omega / Kuando Busylight that follows your Microsoft Teams status."
@@ -14,6 +14,7 @@ rune = { git = "https://github.com/anomalyco/rune", rev = "29aacb688883a9712bc27
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(windows)'.dependencies]

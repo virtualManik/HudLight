@@ -237,6 +237,8 @@ pub struct Config {
     /// Send colour channels as 0–100 instead of 0–255. Only for lights whose firmware reads
     /// percent; set by hand in config.json.
     pub pwm_100: bool,
+    /// Download and install new releases from GitHub in the background.
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -258,6 +260,7 @@ impl Default for Config {
             graph_tenant: "organizations".into(),
             graph_poll_seconds: 10,
             pwm_100: false,
+            auto_update: true,
         }
     }
 }
